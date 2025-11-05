@@ -4,6 +4,9 @@ from typing import Optional
 
 from ..core.usecases import UserService, PortfolioService, RateService
 from ..core.models import User
+from ..core.exceptions import (ValutaTradeError, InsufficientFundsError, 
+                              CurrencyNotFoundError, ApiRequestError, ValidationError)
+from ..core.currencies import get_supported_currencies
 
 class CLI:
     def __init__(self):
@@ -18,13 +21,21 @@ class CLI:
     
     def _validate_currency(self, currency: str) -> bool:
         """Валидирует код валюты"""
-        if not currency or not isinstance(currency, str) or not currency.isalpha():
+        try:
+            from ..core.utils import validate_currency_code
+            validate_currency_code(currency)
+            return True
+        except ValidationError:
             return False
-        return True
-    
+
     def _validate_amount(self, amount: float) -> bool:
         """Валидирует сумму"""
-        return isinstance(amount, (int, float)) and amount > 0
+        try:
+            from ..core.utils import validate_amount
+            validate_amount(amount)
+            return True
+        except ValidationError:
+            return False
     
     def register(self, args):
         """Команда register"""
@@ -79,113 +90,117 @@ class CLI:
         if not self._check_auth():
             return False
         
-        if not self._validate_currency(args.currency):
-            print(f"Некорректный код валюты: '{args.currency}'")
+        try:
+            # Используем обновленный сервис
+            success, message, result_info = PortfolioService.buy_currency(
+                self.current_user.user_id, args.currency, args.amount
+            )
+            
+            if success:
+                print(message)
+                print("Изменения в портфеле:")
+                print(f"  - {args.currency}: было {result_info['old_balance']:.4f} → стало {result_info['new_balance']:.4f}")
+                
+                if result_info.get('rate'):
+                    print(f"Оценочная стоимость покупки: {result_info['cost_usd']:,.2f} USD")
+            else:
+                print(f"Ошибка: {message}")
+                
+            return success
+            
+        except CurrencyNotFoundError as e:
+            print(f"Ошибка: {e}")
+            print("Используйте команду list-currencies для просмотра доступных валют")
             return False
-        
-        if not self._validate_amount(args.amount):
-            print("'amount' должен быть положительным числом")
+        except ValidationError as e:
+            print(f"Ошибка валидации: {e}")
             return False
-        
-        # Получаем курс
-        success, rate, updated_at = RateService.get_exchange_rate(args.currency, 'USD')
-        if not success:
-            print(f"Не удалось получить курс для {args.currency}→USD")
+        except Exception as e:
+            print(f"Неожиданная ошибка: {e}")
             return False
-        
-        # Загружаем и обновляем портфель
-        portfolio = PortfolioService.get_portfolio(self.current_user.user_id)
-        
-        # Добавляем кошелек если его нет
-        if args.currency not in portfolio.wallets:
-            portfolio.add_currency(args.currency, 0.0)
-        
-        wallet = portfolio.get_wallet(args.currency)
-        old_balance = wallet.balance
-        wallet.deposit(args.amount)
-        
-        # Сохраняем изменения
-        PortfolioService.save_portfolio(portfolio)
-        
-        cost_usd = args.amount * rate
-        
-        print(f"Покупка выполнена: {args.amount:.4f} {args.currency} по курсу {rate:.2f} USD/{args.currency}")
-        print("Изменения в портфеле:")
-        print(f"  - {args.currency}: было {old_balance:.4f} → стало {wallet.balance:.4f}")
-        print(f"Оценочная стоимость покупки: {cost_usd:,.2f} USD")
-        
-        return True
     
     def sell(self, args):
         """Команда sell"""
         if not self._check_auth():
             return False
         
-        if not self._validate_currency(args.currency):
-            print(f"Некорректный код валюты: '{args.currency}'")
+        try:
+            success, message, result_info = PortfolioService.sell_currency(
+                self.current_user.user_id, args.currency, args.amount
+            )
+            
+            if success:
+                print(message)
+                print("Изменения в портфеле:")
+                print(f"  - {args.currency}: было {result_info['old_balance']:.4f} → стало {result_info['new_balance']:.4f}")
+                
+                if result_info.get('rate'):
+                    print(f"Оценочная выручка: {result_info['revenue_usd']:,.2f} USD")
+            else:
+                print(f"Ошибка: {message}")
+                
+            return success
+            
+        except InsufficientFundsError as e:
+            print(f"Ошибка: {e}")
             return False
-        
-        if not self._validate_amount(args.amount):
-            print("'amount' должен быть положительным числом")
+        except CurrencyNotFoundError as e:
+            print(f"Ошибка: {e}")
             return False
-        
-        # Загружаем портфель
-        portfolio = PortfolioService.get_portfolio(self.current_user.user_id)
-        
-        # Проверяем наличие кошелька
-        if args.currency not in portfolio.wallets:
-            print(f"У вас нет кошелька '{args.currency}'. Добавьте валюту: она создаётся автоматически при первой покупке.")
+        except ValidationError as e:
+            print(f"Ошибка валидации: {e}")
             return False
-        
-        wallet = portfolio.get_wallet(args.currency)
-        
-        # Проверяем достаточно ли средств
-        if args.amount > wallet.balance:
-            print(f"Недостаточно средств: доступно {wallet.balance:.4f} {args.currency}, требуется {args.amount:.4f} {args.currency}")
+        except Exception as e:
+            print(f"Неожиданная ошибка: {e}")
             return False
-        
-        # Получаем курс
-        success, rate, updated_at = RateService.get_exchange_rate(args.currency, 'USD')
-        if not success:
-            print(f"Не удалось получить курс для {args.currency}→USD")
-            return False
-        
-        old_balance = wallet.balance
-        wallet.withdraw(args.amount)
-        
-        # Сохраняем изменения
-        PortfolioService.save_portfolio(portfolio)
-        
-        revenue_usd = args.amount * rate
-        
-        print(f"Продажа выполнена: {args.amount:.4f} {args.currency} по курсу {rate:.2f} USD/{args.currency}")
-        print("Изменения в портфеле:")
-        print(f"  - {args.currency}: было {old_balance:.4f} → стало {wallet.balance:.4f}")
-        print(f"Оценочная выручка: {revenue_usd:,.2f} USD")
-        
-        return True
     
     def get_rate(self, args):
         """Команда get-rate"""
-        if not self._validate_currency(args.from_currency) or not self._validate_currency(args.to_currency):
-            print("Некорректные коды валют")
+        try:
+            success, rate, error_message = RateService.get_exchange_rate(args.from_currency, args.to_currency)
+            
+            if success:
+                # Получаем обратный курс
+                _, reverse_rate, _ = RateService.get_exchange_rate(args.to_currency, args.from_currency)
+                
+                print(f"Курс {args.from_currency}→{args.to_currency}: {rate:.8f}")
+                print(f"Обратный курс {args.to_currency}→{args.from_currency}: {reverse_rate:.8f}")
+                return True
+            else:
+                print(f"Ошибка: {error_message}")
+                
+                # Специальная обработка для неизвестной валюты
+                if "Неизвестная валюта" in error_message:
+                    print("Используйте команду list-currencies для просмотра доступных валют")
+                
+                return False
+                
+        except CurrencyNotFoundError as e:
+            print(f"Ошибка: {e}")
+            print("Используйте команду list-currencies для просмотра доступных валют")
+            return False
+        except ApiRequestError as e:
+            print(f"Ошибка: {e}")
+            print("Повторите попытку позже")
+            return False
+        except Exception as e:
+            print(f"Неожиданная ошибка: {e}")
             return False
         
-        success, rate, updated_at = RateService.get_exchange_rate(args.from_currency, args.to_currency)
+    def list_currencies(self, args):
+        """Команда для отображения списка поддерживаемых валют"""
+        currencies = get_supported_currencies()
         
-        if not success:
-            print(f"Курс {args.from_currency}→{args.to_currency} недоступен. Повторите попытку позже.")
-            return False
+        if not currencies:
+            print("Нет доступных валют")
+            return True
         
-        # Получаем обратный курс
-        _, reverse_rate, _ = RateService.get_exchange_rate(args.to_currency, args.from_currency)
-        
-        updated_time = updated_at.split('T')[1].split('.')[0] if 'T' in updated_at else updated_at
-        
-        print(f"Курс {args.from_currency}→{args.to_currency}: {rate:.8f} (обновлено: {updated_time})")
-        print(f"Обратный курс {args.to_currency}→{args.from_currency}: {reverse_rate:.2f}")
+        print("Поддерживаемые валюты:")
+        for currency_code, currency_obj in currencies.items():
+            print(f"  - {currency_obj.get_display_info()}")
         
         return True
+
 
 def main():
     cli = CLI()
@@ -221,6 +236,8 @@ def main():
     rate_parser.add_argument('--from', dest='from_currency', required=True, help='Исходная валюта')
     rate_parser.add_argument('--to', dest='to_currency', required=True, help='Целевая валюта')
     
+    list_parser = subparsers.add_parser('list-currencies', help='Показать поддерживаемые валюты')
+    
     args = parser.parse_args()
     
     # Выполняем команду
@@ -230,7 +247,8 @@ def main():
         'show-portfolio': cli.show_portfolio,
         'buy': cli.buy,
         'sell': cli.sell,
-        'get-rate': cli.get_rate
+        'get-rate': cli.get_rate,
+        'list-currencies': cli.list_currencies
     }
     
     try:
