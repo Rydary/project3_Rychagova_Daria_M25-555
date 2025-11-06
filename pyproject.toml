@@ -6,9 +6,10 @@ authors = [
     {name = "Rydary",email = "90640722+Rydary@users.noreply.github.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = [
-]
+
+[tool.poetry.dependencies]
+python = "^3.13"
+requests = "^2.31.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
